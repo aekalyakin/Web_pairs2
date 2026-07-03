@@ -26,6 +26,7 @@ const pollSchema = new mongoose.Schema({
 
   votingDurationMinutes: { type: Number, default: 60 },
   votingEndsAt: { type: Date, default: null },
+  targetParticipants: { type: Number, default: 2 }, // лимит из тарифа/выбора создателя
 
   createdAt: { type: Date, default: Date.now },
   expiresAt: { type: Date, default: () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) },
