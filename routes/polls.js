@@ -41,6 +41,7 @@ router.get('/mine', authMiddleware, async (req, res) => {
           status: poll.status,
           cardsCount: poll.cards.length,
           participantsCount: poll.participants.length,
+          targetParticipants: poll.targetParticipants,
           progress: totalVotesNeeded > 0 ? Math.round((votesCount / totalVotesNeeded) * 100) : 0,
           sessionCode: poll.sessionCode,
           createdAt: poll.createdAt,
@@ -57,7 +58,7 @@ router.get('/mine', authMiddleware, async (req, res) => {
 
 router.post('/create', authMiddleware, async (req, res) => {
   try {
-    const { title, category, scenario, participants = [] } = req.body;
+    const { title, category, scenario, participants = [], targetParticipants } = req.body;
     if (!title || !category || !scenario) {
       return res.status(400).json({ error: 'Заполните все обязательные поля' });
     }
@@ -69,6 +70,7 @@ router.post('/create', authMiddleware, async (req, res) => {
       participants: [...new Set([...participants, String(req.userId)])],
       sessionCode,
       cards: [],
+      targetParticipants: [2, 5, 10, 20].includes(Number(targetParticipants)) ? Number(targetParticipants) : 2,
     });
     await poll.save();
     await poll.populate('participants', 'name photoUrl telegramUsername');
@@ -87,7 +89,15 @@ router.post('/join', authMiddleware, async (req, res) => {
     const poll = await Poll.findOne({ sessionCode: sessionCode.toUpperCase() });
     if (!poll) return res.status(404).json({ error: 'Опрос не найден' });
 
-    if (!poll.participants.map(String).includes(String(req.userId))) {
+    const alreadyIn = poll.participants.map(String).includes(String(req.userId));
+
+    if (!alreadyIn) {
+      if (poll.status === 'completed' || (poll.votingEndsAt && poll.votingEndsAt <= new Date())) {
+        return res.status(400).json({ error: 'Голосование уже завершилось' });
+      }
+      if (poll.participants.length >= poll.targetParticipants) {
+        return res.status(400).json({ error: 'Опрос уже набрал нужное количество участников' });
+      }
       poll.participants.push(req.userId);
       await poll.save();
     }
@@ -183,9 +193,6 @@ router.post('/:pollId/start-voting', authMiddleware, async (req, res) => {
     }
     if (poll.cards.length === 0) {
       return res.status(400).json({ error: 'Добавьте карточки перед голосованием' });
-    }
-    if (poll.participants.length < 2) {
-      return res.status(400).json({ error: 'Нужен ещё хотя бы один участник, чтобы начать голосование' });
     }
 
     poll.status = 'active';

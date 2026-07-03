@@ -44,6 +44,16 @@ router.post('/vote', authMiddleware, async (req, res) => {
       isMatch = allParticipantIds.length > 1 && allParticipantIds.every(id => likedBy.has(id));
     }
 
+    // ── Досрочное завершение: комната набрана полностью и все проголосовали за все карточки ──
+    if (poll.status === 'active' && poll.participants.length >= poll.targetParticipants) {
+      const totalVotesNow = await Vote.countDocuments({ pollId });
+      const requiredVotes = poll.cards.length * poll.targetParticipants;
+      if (requiredVotes > 0 && totalVotesNow >= requiredVotes) {
+        poll.status = 'completed';
+        await poll.save();
+      }
+    }
+
     res.status(201).json({ vote: voteRecord, isMatch });
   } catch (error) {
     res.status(500).json({ error: error.message });
