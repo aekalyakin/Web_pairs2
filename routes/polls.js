@@ -10,6 +10,16 @@ function generateSessionCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
+// Если время голосования истекло, а статус ещё 'active' — переводим в 'completed'.
+// Вызывается лениво при каждом обращении к опросу, отдельный cron не нужен.
+async function autoExpireIfNeeded(poll) {
+  if (poll.status === 'active' && poll.votingEndsAt && poll.votingEndsAt <= new Date()) {
+    poll.status = 'completed';
+    await poll.save();
+  }
+  return poll;
+}
+
 // ── Список опросов текущего пользователя (для главного экрана) ─────
 router.get('/mine', authMiddleware, async (req, res) => {
   try {
@@ -19,6 +29,7 @@ router.get('/mine', authMiddleware, async (req, res) => {
 
     const enriched = await Promise.all(
       polls.map(async (poll) => {
+        await autoExpireIfNeeded(poll);
         const totalVotesNeeded = poll.cards.length * poll.participants.length;
         const votesCount = totalVotesNeeded > 0
           ? await Vote.countDocuments({ pollId: poll._id })
@@ -33,6 +44,7 @@ router.get('/mine', authMiddleware, async (req, res) => {
           progress: totalVotesNeeded > 0 ? Math.round((votesCount / totalVotesNeeded) * 100) : 0,
           sessionCode: poll.sessionCode,
           createdAt: poll.createdAt,
+          votingEndsAt: poll.votingEndsAt,
         };
       })
     );
@@ -98,6 +110,7 @@ router.get('/:pollId', authMiddleware, async (req, res) => {
       return res.status(403).json({ error: 'Вы не участник этого опроса' });
     }
 
+    await autoExpireIfNeeded(poll);
     res.json(poll);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -171,8 +184,16 @@ router.post('/:pollId/start-voting', authMiddleware, async (req, res) => {
     if (poll.cards.length === 0) {
       return res.status(400).json({ error: 'Добавьте карточки перед голосованием' });
     }
+    if (poll.participants.length < 2) {
+      return res.status(400).json({ error: 'Нужен ещё хотя бы один участник, чтобы начать голосование' });
+    }
 
     poll.status = 'active';
+    const durationMinutes = [15, 60, 180].includes(Number(req.body.durationMinutes))
+      ? Number(req.body.durationMinutes)
+      : 60; // если прислали что-то неожиданное — час по умолчанию
+    poll.votingDurationMinutes = durationMinutes;
+    poll.votingEndsAt = new Date(Date.now() + durationMinutes * 60 * 1000);
     await poll.save();
     res.json({ poll, message: 'Голосование началось' });
   } catch (error) {

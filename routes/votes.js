@@ -57,6 +57,11 @@ router.get('/results/:pollId', authMiddleware, async (req, res) => {
     const poll = await Poll.findById(pollId);
     if (!poll) return res.status(404).json({ error: 'Опрос не найден' });
 
+    if (poll.status === 'active' && poll.votingEndsAt && poll.votingEndsAt <= new Date()) {
+      poll.status = 'completed';
+      await poll.save();
+    }
+
     const votes = await Vote.find({ pollId });
 
     const results = poll.cards.map(card => {
@@ -82,6 +87,9 @@ router.get('/results/:pollId', authMiddleware, async (req, res) => {
     const totalPossible = poll.cards.length * poll.participants.length;
     res.json({
       pollId,
+      title: poll.title,
+      status: poll.status,
+      votingEndsAt: poll.votingEndsAt,
       totalParticipants: poll.participants.length,
       results,
       completionRate: totalPossible > 0 ? Math.round((votes.length / totalPossible) * 100) : 0,
