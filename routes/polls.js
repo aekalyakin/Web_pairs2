@@ -27,28 +27,36 @@ router.get('/mine', authMiddleware, async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(30);
 
-    const enriched = await Promise.all(
-      polls.map(async (poll) => {
-        await autoExpireIfNeeded(poll);
-        const totalVotesNeeded = poll.cards.length * poll.participants.length;
-        const votesCount = totalVotesNeeded > 0
-          ? await Vote.countDocuments({ pollId: poll._id })
-          : 0;
-        return {
-          _id: poll._id,
-          title: poll.title,
-          category: poll.category,
-          status: poll.status,
-          cardsCount: poll.cards.length,
-          participantsCount: poll.participants.length,
-          targetParticipants: poll.targetParticipants,
-          progress: totalVotesNeeded > 0 ? Math.round((votesCount / totalVotesNeeded) * 100) : 0,
-          sessionCode: poll.sessionCode,
-          createdAt: poll.createdAt,
-          votingEndsAt: poll.votingEndsAt,
-        };
-      })
-    );
+    // Автозавершаем просроченные — до подсчёта голосов, чтобы статус был актуальным
+    await Promise.all(polls.map(autoExpireIfNeeded));
+
+    // Один агрегирующий запрос на все опросы разом вместо N отдельных countDocuments
+    const pollIds = polls.map(p => p._id);
+    const voteCounts = await Vote.aggregate([
+      { $match: { pollId: { $in: pollIds } } },
+      { $group: { _id: '$pollId', count: { $sum: 1 } } },
+    ]);
+    const votesByPoll = new Map(voteCounts.map(v => [String(v._id), v.count]));
+
+    const enriched = polls.map(poll => {
+      const totalVotesNeeded = poll.cards.length * poll.participants.length;
+      const votesCount = votesByPoll.get(String(poll._id)) || 0;
+      return {
+        _id: poll._id,
+        title: poll.title,
+        category: poll.category,
+        status: poll.status,
+        cardsCount: poll.cards.length,
+        participantsCount: poll.participants.length,
+        targetParticipants: poll.targetParticipants,
+        progress: totalVotesNeeded > 0 ? Math.round((votesCount / totalVotesNeeded) * 100) : 0,
+        votesCount,
+        sessionCode: poll.sessionCode,
+        createdBy: String(poll.createdBy),
+        createdAt: poll.createdAt,
+        votingEndsAt: poll.votingEndsAt,
+      };
+    });
 
     res.json(enriched);
   } catch (error) {
@@ -218,6 +226,49 @@ router.post('/:pollId/complete', authMiddleware, async (req, res) => {
     poll.status = 'completed';
     await poll.save();
     res.json({ poll, message: 'Опрос завершён' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Удаление опроса — организатор чистит список себе, опрос и голоса удаляются полностью ──
+router.delete('/:pollId', authMiddleware, async (req, res) => {
+  try {
+    const poll = await Poll.findById(req.params.pollId);
+    if (!poll) return res.status(404).json({ error: 'Опрос не найден' });
+    if (String(poll.createdBy) !== String(req.userId)) {
+      return res.status(403).json({ error: 'Только организатор может удалить опрос' });
+    }
+
+    await Vote.deleteMany({ pollId: poll._id });
+    await poll.deleteOne();
+
+    res.json({ message: 'Опрос удалён' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Быстрое редактирование — только организатор и только пока никто не проголосовал ──
+router.patch('/:pollId', authMiddleware, async (req, res) => {
+  try {
+    const poll = await Poll.findById(req.params.pollId);
+    if (!poll) return res.status(404).json({ error: 'Опрос не найден' });
+    if (String(poll.createdBy) !== String(req.userId)) {
+      return res.status(403).json({ error: 'Только организатор может редактировать опрос' });
+    }
+
+    const votesCount = await Vote.countDocuments({ pollId: poll._id });
+    if (votesCount > 0) {
+      return res.status(400).json({ error: 'Уже есть голоса — редактирование недоступно' });
+    }
+
+    const { title, category } = req.body;
+    if (title && title.trim()) poll.title = title.trim();
+    if (category) poll.category = category;
+    await poll.save();
+
+    res.json({ poll, message: 'Опрос обновлён' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
